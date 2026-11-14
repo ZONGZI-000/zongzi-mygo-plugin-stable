@@ -1,12 +1,112 @@
 {
-  "channel": "stable",
+  "channel": "beta",
   "latest": {
-    "version": "1.0.0",
+    "version": "1.1.0-beta.20",
     "zip": "releases/latest/plugin-win32-amd64.zip",
-    "size": 148867,
-    "installUrl": "https://github.com/ZONGZI-000/zongzi-mygo-plugin-stable/releases/latest/download/plugin-win32-amd64.zip"
+    "size": 155433,
+    "installUrl": "https://github.com/ZONGZI-000/zongzi-mygo-plugin-beta/releases/latest/download/plugin-win32-amd64.zip"
   },
   "history": [
+    {
+      "version": "1.1.0-beta.20",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.20.zip",
+      "size": 155433
+    },
+    {
+      "version": "1.1.0-beta.19",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.19.zip",
+      "size": 155469
+    },
+    {
+      "version": "1.1.0-beta.18",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.18.zip",
+      "size": 155151
+    },
+    {
+      "version": "1.1.0-beta.17",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.17.zip",
+      "size": 155257
+    },
+    {
+      "version": "1.1.0-beta.16",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.16.zip",
+      "size": 155244
+    },
+    {
+      "version": "1.1.0-beta.15",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.15.zip",
+      "size": 155196
+    },
+    {
+      "version": "1.1.0-beta.14",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.14.zip",
+      "size": 155144
+    },
+    {
+      "version": "1.1.0-beta.13",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.13.zip",
+      "size": 155471
+    },
+    {
+      "version": "1.1.0-beta.12",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.12.zip",
+      "size": 154757
+    },
+    {
+      "version": "1.1.0-beta.11",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.11.zip",
+      "size": 154271
+    },
+    {
+      "version": "1.1.0-beta.10",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.10.zip",
+      "size": 155381
+    },
+    {
+      "version": "1.1.0-beta.9",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.9.zip",
+      "size": 154999
+    },
+    {
+      "version": "1.1.0-beta.8",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.8.zip",
+      "size": 154768
+    },
+    {
+      "version": "1.1.0-beta.7",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.7.zip",
+      "size": 154776
+    },
+    {
+      "version": "1.1.0-beta.6",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.6.zip",
+      "size": 154580
+    },
+    {
+      "version": "1.1.0-beta.5",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.5.zip",
+      "size": 154291
+    },
+    {
+      "version": "1.1.0-beta.4",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.4.zip",
+      "size": 154177
+    },
+    {
+      "version": "1.1.0-beta.3",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.3.zip",
+      "size": 153808
+    },
+    {
+      "version": "1.1.0-beta.2",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.2.zip",
+      "size": 151272
+    },
+    {
+      "version": "1.1.0-beta.1",
+      "zip": "releases/history/zongzi-music-1.1.0-beta.1.zip",
+      "size": 148871
+    },
     {
       "version": "1.0.0",
       "zip": "releases/history/zongzi-music-1.0.0.zip",

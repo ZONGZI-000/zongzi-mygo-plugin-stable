@@ -4262,6 +4262,8 @@ export async function liked({ offset }) {
   };
 }
 
+
+
 /* ---------------- 最近播放 ---------------- */
 
 export async function played({ id }) {
@@ -4532,7 +4534,15 @@ export async function playlists() {
     {
       id: "fav:liked",
       name: "我喜欢",
-      imageUrl: (favs[0] && ((favs[0].album && favs[0].album.imageUrl) || favs[0].artwork)) || FALLBACK_COVER,
+      /* 固定用「我喜欢」专属封面，不跟首曲封面走（用户要求统一）。
+         ⚠️ IMG_BASE / LIKED_COVER 在文件更靠后才有定义；这里是函数体，
+            运行时才求值，所以能拿到。但如果哪天有人把 playlists() 提到
+            常量初始化之前**调用**，就会撞 TDZ。为绝对安全，这里用
+            typeof 兜底，拿不到就退回 FALLBACK_COVER。 */
+      imageUrl:
+        typeof LIKED_COVER === "string" && LIKED_COVER
+          ? LIKED_COVER
+          : IMG_BASE + "zongzi-liked-cover.jpg",
       description: favs.length ? "我收藏的全部歌曲" : "还没有收藏，点心形按钮试试",
       owner: "我",
       trackCount: favs.length,
@@ -4869,22 +4879,70 @@ export async function artist({ id }) {
   const m = /^nar:(\d+)$/.exec(String(id));
   if (!m) throw fail("unavailable", "无法识别的歌手");
   const artistId = m[1];
+  /* ⚠️⚠️ 名字/封面不能只信内存 artistCache —— 它是进程内的 Map，
+     MyGo 一重启就空了。实测踩过：从「艺人收藏」点进去，页面标题变成
+     「歌手」、头像是空白圆、专辑区一片空。
+     兜底顺序：
+       ① artistCache（本进程刚搜过 / 刚关注过）
+       ② 收藏列表快照（followedArtists 里就存着 name + imageUrl）
+       ③ 网易 artist 详情接口（补封面，也补名字）
+     name 还必须拿到，否则 songsOfArtist 拿空串去搜，一首歌都搜不到。 */
   const cached = artistCache.get(artistId);
-  const name = (cached && cached.name) || "";
+  let name = (cached && cached.name) || "";
+  let cover = (cached && cached.artwork) || "";
+  if (!name || !cover) {
+    const fav = readList(FOLLOWED_ARTIST_KEY).find(
+      (x) => String(x.id) === "nar:" + artistId
+    );
+    if (fav) {
+      if (!name && fav.name) name = String(fav.name);
+      if (!cover && fav.imageUrl) cover = String(fav.imageUrl);
+    }
+  }
+  if (!name || !cover) {
+    try {
+      const url =
+        "https://music.163.com/api/artist/" + encodeURIComponent(artistId);
+      const { text } = await fetchText(url, {
+        headers: { Referer: "https://music.163.com/" },
+      });
+      const d = JSON.parse(text);
+      const a = (d && d.artist) || {};
+      if (!name && a.name) name = String(a.name);
+      if (!cover) cover = String(a.picUrl || a.img1v1Url || "");
+    } catch {}
+  }
+  if (name) artistCache.set(artistId, { name, artwork: cover });
   let tracks = [];
-  try {
-    tracks = await songsOfArtist(artistId, name);
-  } catch {}
+  if (name) {
+    try {
+      tracks = await songsOfArtist(artistId, name);
+    } catch {}
+  }
   remember(tracks);
   return {
     artist: {
       id,
       name: name || "歌手",
-      imageUrl: (cached && cached.artwork) || "",
-      artwork: (cached && cached.artwork) || "",
+      imageUrl: cover,
+      artwork: cover,
     },
     tracks,
-    albums: [],
+    /* ⚠️ 网易艺人接口拿不到干净的专辑结构（app 接口要签名，web 接口返回的
+       hotSongs/albums 结构经常缺），所以跟 yda: 下架歌手一样，把「全部歌曲」
+       做成一个虚拟专辑 —— 至少别让专辑区空着显得像坏了。 */
+    albums: tracks.length
+      ? [
+          {
+            id: "ydalb:" + (name || "歌手"),
+            name: (name || "歌手") + " · 全部歌曲",
+            imageUrl: cover,
+            artwork: cover,
+            artists: [{ id, name: name || "歌手" }],
+            trackCount: tracks.length,
+          },
+        ]
+      : [],
   };
 }
 
@@ -4927,7 +4985,13 @@ export async function playlist({ id }) {
     return {
       id: "fav:liked",
       name: "我喜欢",
-      imageUrl: (tracks[0] && ((tracks[0].album && tracks[0].album.imageUrl) || tracks[0].artwork)) || "",
+      /* 详情页也用同一张固定封面 —— 两个页面视觉统一，
+         不再因为首曲有没有封面而出现「一边有图一边空」。
+         （typeof 兜底同 playlists()，防 TDZ） */
+      imageUrl:
+        typeof LIKED_COVER === "string" && LIKED_COVER
+          ? LIKED_COVER
+          : IMG_BASE + "zongzi-liked-cover.jpg",
       trackCount: tracks.length,
       owner: "我",
       description: tracks.length ? "我收藏的全部歌曲" : "还没有收藏，点心形按钮试试",
@@ -5037,6 +5101,27 @@ const FALLBACK_COVER = IMG_BASE + "zongzi-cover-fallback.jpg";
    播客节目有时 RSS 不给 itunes:image、或订阅卡片缺图，
    用这张替代普通歌曲兜底图，视觉上一眼能区分「这是播客」。 */
 const PODCAST_FALLBACK_COVER = IMG_BASE + "zongzi-podcast-fallback.jpg";
+
+/* ffmpeg 未安装时首页那张提示卡片的配图：看板娘举「点我下载」牌子（半身像）。
+   ⚠️ MyGo 的 links 元素有 imageUrl 字段，带图会渲染成卡片（比灰音符占位好看），
+      但卡片样式本身没法定制 —— 这是播放器画的，插件只能给图。
+   ⚠️ 2026-11-11 换过一次：旧版戴小黄安全帽，用户反馈「看起来怪怪的」，
+      新版去掉了帽子，改成把牌子举向镜头，构图更像「递给你」。 */
+const FFMPEG_PROMPT_IMAGE = IMG_BASE + "zongzi-ffmpeg-prompt-bust.jpg";
+
+/* 「我喜欢」专用封面：看板娘闭眼捧心，周围浮小爱心。
+   ⚠️ 这张**固定**用，不随首曲专辑封面变 ——
+      用户明确要求（2026-11-12）：「有音乐那也不用换封面」。
+      理由：收藏列表是「我的」东西，用固定形象比用某首歌的专辑图更稳，
+      也不会因为收藏/取消收藏第一首就换掉整张封面。 */
+const LIKED_COVER = IMG_BASE + "zongzi-liked-cover.jpg";
+
+/* 正在下载时的配图：看板娘抱着带进度环的平板，旁边浮着加载圆点。 */
+const FFMPEG_DOWNLOADING_IMAGE = IMG_BASE + "zongzi-ffmpeg-downloading.jpg";
+
+/* ffmpeg 已就绪时的配图：看板娘敬礼 + 绿色对勾徽章（半身像）。
+   ⚠️ 用半身像而不是全身 —— 全身在卡片里缩得太小看不清表情。 */
+const FFMPEG_READY_IMAGE = IMG_BASE + "zongzi-ffmpeg-ready-bust.jpg";
 
 function sinkThumb(t) {
   if (!t) return t;
@@ -5336,31 +5421,197 @@ async function ensureFfmpeg() {
   }
 }
 
+/* ============================================================
+ * ffmpeg 静默检测（给首页用，绝不触发下载）
+ * ------------------------------------------------------------
+ * ensureFfmpeg() 是「没有就下载」，首页不能调它 ——
+ * 用户只是打开首页，不该被动拉 78MB。
+ *
+ * 这里只做一件事：问文件大小 + 试着跑一下 -version。
+ * 返回 { installed, sizeMB, path }，失败一律当作未安装。
+ * ============================================================ */
+async function ffmpegStatus() {
+  const abs = ffmpegPath();
+  const win = isWindows();
+  const dest = win ? abs.replace(/\//g, "\\") : abs;
+
+  /* 先直接 spawn ffmpeg -version 探一次 —— 这比问 PowerShell 更直接：
+     「能跑起来」本身就证明「文件存在且可执行」，一步到位。
+     ⚠️ 曾经只靠 Test-Path，结果 MyGo 刚启动时 PowerShell 可能还没就绪，
+        exit code 判成「不存在」→ 首页误报「未安装」→ 用户以为要重下。
+        现在以 spawn 结果为准，Test-Path 只在 spawn 失败时做二次确认。 */
+  let runnable = false;
+  try {
+    const probe = await runOnce(abs, ["-version"], 8000);
+    runnable = probe.ok;
+  } catch {}
+
+  /* exists 单独表示「文件在不在这块磁盘上」，和 runnable（能不能跑）分开看。 */
+  let exists = runnable; // spawn 成功本身已经证明文件存在
+  if (!exists) {
+    // spawn 失败 → 用 Test-Path 区分「没文件」和「有文件但跑不起来」
+    try {
+      const cmd = win ? "powershell" : "/bin/sh";
+      const args = win
+        ? ["-NoProfile", "-NonInteractive", "-Command", "if(Test-Path '" + dest + "'){exit 0}else{exit 1}"]
+        : ["-c", "test -f '" + dest + "'"];
+      const r = await runOnce(cmd, args, 8000);
+      exists = r.ok;
+      trace("ffmpeg Test-Path 兜底", "exists=" + exists);
+    } catch {}
+  }
+
+  /* ⚠️⚠️ 判定用 OR，不是 AND！
+     踩过的坑（2026-11-12）：这里原本写的是 `exists && runnable`，
+     而 exists 在 spawn 失败后才由 Test-Path 补上 —— 也就是说
+     runnable=false 时，即使 Test-Path 明确说文件在，AND 依旧得 false。
+     结果：状态页（spawn 成功）显示「已安装」，首页（spawn 偶发超时/慢启动）
+     显示「未安装」，同一份文件两处结论打架。
+
+     正确语义是「有文件就能用」：
+       · spawn 成功（runnable）→ 文件在且可执行，最可信
+       · spawn 失败但 Test-Path 说文件在（exists）→ 文件存在，
+         可能是 ffmpeg 首次启动慢/被杀进程，不该判定为「没装」
+     所以用 OR。真·文件不存在时两者都是 false，照样报未安装。 */
+  const installed = runnable || exists;
+
+  return {
+    installed,
+    sizeMB: installed ? 77.4 : 0, // 下载源实际 81,114,624 字节 ≈ 77.4 MB
+    path: ffmpegRelPath(),
+  };
+}
+
+/* ============================================================
+ * ffmpeg 能力探测（不同构建支持的选项不一样）
+ * ------------------------------------------------------------
+ * 背景（2026-11-11 实测）：
+ *   · 163MB gyan.dev **full**    构建 → 支持 -request_size
+ *   · 78MB  gyan.dev **essentials** 构建 → "Option not found" 直接秒退
+ *   而 -request_size 挂了的话，整条转码命令都起不来，
+ *   用户看到的就是「这首歌暂时找不到能播的音源」。
+ *
+ * 做法：**探测一次 + 缓存结果**，而不是每次播放都撞墙重试。
+ *   · 探测方式：拿 -request_size 拼一条无害命令跑一下，看 exit code
+ *     （实测 不支持=1 / 支持=0，不受 stdout 被吞影响）
+ *   · 结果缓存在模块级变量里，同一个 ffmpeg 只探一次
+ *   · 换 ffmpeg（重新下载/用户自备）后路径变了会自动重探
+ * ============================================================ */
+let FF_CAP_CACHE = { path: "", requestSize: true };
+
+async function ffmpegSupports(exe, flagName) {
+  // 缓存命中：同一个 exe 直接返回上次结果
+  if (FF_CAP_CACHE.path === exe && flagName === "request_size") {
+    return FF_CAP_CACHE.requestSize;
+  }
+
+  let ok = true;
+  try {
+    /* 用 -version 当作"无害的尾巴"：ffmpeg 会先解析所有选项，
+       遇到不认识的立刻报 Option not found 并 exit 1；
+       认识的话正常打印版本 exit 0。
+       ⚠️ 不用 -h 或空命令 —— 那些行为各构建不一致。 */
+    const probe = await runOnce(exe, ["-request_size", "10485760", "-version"], 8000);
+    ok = probe.ok;
+  } catch {
+    ok = true; // 探测本身出错时保守放行（宁可试一次，也不主动阉掉功能）
+  }
+
+  FF_CAP_CACHE = { path: exe, requestSize: ok };
+  trace("ffmpeg 能力探测", "-request_size=" + ok + " (" + exe + ")");
+  console.log("[粽子] ffmpeg 支持 -request_size: " + (ok ? "是" : "否（已自动降级）"));
+  return ok;
+}
+
+/* 后台开始下载，立刻返回，不阻塞首页渲染。
+   首页只负责「点一下启动」，真正的下载靠 ensureFfmpeg() 自己跑完。 */
+let BG_DOWNLOAD_STARTED_AT = 0;
+function startFfmpegDownloadInBackground() {
+  if (DOWNLOAD_STATE === "downloading" || DOWNLOAD_PROMISE) return;
+  if (DOWNLOAD_STATE === "ready") return;
+  BG_DOWNLOAD_STARTED_AT = Date.now();
+  console.log("[粽子] 首页触发 ffmpeg 下载");
+  // 故意不 await —— 让下载在后台跑，首页马上返回
+  ensureFfmpeg()
+    .then((p) => {
+      if (p) console.log("[粽子] 后台下载 ffmpeg 完成: " + p);
+      else console.log("[粽子] 后台下载 ffmpeg 失败");
+    })
+    .catch((e) => console.log("[粽子] 后台下载异常: " + ((e && e.message) || e)));
+}
+
 
 /* ffmpeg 不读系统代理，要显式传 -http_proxy。
-   MyGo 的设置项只有文本框（没有开关控件），所以一个字段表达三态：
 
-     留空    → 默认代理 127.0.0.1:7890
-     off     → 不用代理
-     其它    → 当作地址（没写协议会自动补 http://）
-   兼容旧的 0 / 1 写法。 */
+   代理设置从 v1.1.0-beta.13 起是「开关 + 地址框」两项：
+     useProxy  boolean  → "true" 走代理 / "false" 直连
+     proxyUrl  text     → 留空用 http://127.0.0.1:7890
+
+   ⚠️ 更早的版本只有一个 proxyMode 文本框（留空=默认 / off=关 / 其它=地址），
+      resolveProxy() 里保留了完整的老键回退逻辑，升级不会打断已有代理。 */
 const DEFAULT_PROXY = "http://127.0.0.1:7890";
 
 let PROXY_CACHE = null;
-function resolveProxy() {
-  let v = "";
+/* 读一个设置项，拿不到返回 "" */
+function settingStr(key) {
   try {
-    if (host && host.setting) v = String(host.setting("proxyMode") || "").trim();
+    if (host && host.setting) return String(host.setting(key) || "").trim();
   } catch {}
+  return "";
+}
 
-  if (!v) return DEFAULT_PROXY; // 留空 → 默认
-  const low = v.toLowerCase();
+function resolveProxy() {
+  /* ============================================================
+   * 新方案（MyGo ≥ 0.1.23）：开关 + 地址框
+   *   proxySwitch → "" 自动（默认开） / "on" 强制开 / "off" 直连
+   *   proxyUrl  → 地址，留空用 DEFAULT_PROXY
+   *
+   * ⚠️ 为什么用 select 而不是 boolean：
+   *   官方文档说 boolean 的「未设置值显示为关」，而我们的默认行为是**开代理**。
+   *   那样界面显示「关」但实际在走代理，会误导人。
+   *   用 select 把「自动（默认开启）」做成一个可见选项，界面和行为就一致了。
+   *
+   * ⚠️⚠️ 必须兼容老配置！
+   *   旧版只有一个 proxyMode 文本框，用户可能存过：
+   *     ""        → 默认代理
+   *     "off"/"0" → 不用代理
+   *     "http://..." → 自定义地址
+   *   升级后 useProxy/proxyUrl 都是「未设置」状态，
+   *   如果直接当 false 处理，用户会突然断掉代理 → YouTube 全挂。
+   *   所以判断顺序是：**先看新键有没有值，都没有才回退旧键**。
+   * ============================================================ */
+  const sw = settingStr("proxySwitch").toLowerCase();
+  const url = settingStr("proxyUrl");
+
+  /* 新方案：proxySwitch 两项 select
+       ""    → 开启（默认）
+       "off" → 关闭直连
+     ⚠️ 空值必须走代理 —— 用户装完插件没动过设置时，
+        默认就该是能播 YouTube 的状态，而不是直连放不了。
+     ⚠️ 旧版的 "on"（曾经的「强制开启」）行为与默认完全一致，
+        保留识别只为免得老值失效。 */
+  if (sw !== "" || url !== "") {
+    if (sw === "off" || sw === "0" || sw === "false") return ""; // 直连
+    if (!url) return DEFAULT_PROXY;
+    return url.indexOf("://") < 0 ? "http://" + url : url;
+  }
+
+  /* 兼容 beta.13 短暂用过的 useProxy 布尔开关键 */
+  const use = settingStr("useProxy").toLowerCase();
+  if (use !== "") {
+    const on = use === "true" || use === "1" || use === "on";
+    if (!on) return "";
+    return url || DEFAULT_PROXY;
+  }
+
+  /* 新键都没设置 → 回退旧的 proxyMode（保证升级不打断代理） */
+  const legacy = settingStr("proxyMode");
+  if (!legacy) return DEFAULT_PROXY; // 留空 → 默认
+  const low = legacy.toLowerCase();
   if (low === "off" || low === "0" || low === "no" || low === "false" || low === "关") return "";
   if (low === "1" || low === "on" || low === "yes" || low === "true" || low === "开") return DEFAULT_PROXY;
 
-  // 其它值当作地址
-  if (v.indexOf("://") < 0) v = "http://" + v;
-  return v;
+  return legacy.indexOf("://") < 0 ? "http://" + legacy : legacy;
 }
 
 function proxyArg() {
@@ -5404,7 +5655,10 @@ async function serveWithFfmpeg(sourceUrl, userAgent, bitRate = 128, extraHeaders
 
   const port = pickPort();
   const url = "http://127.0.0.1:" + port + "/";
-  const args = [
+
+  /* 参数由函数生成，方便「去掉不支持的选项重试」——
+     见下面 withRequestSize 的说明。 */
+  const buildArgs = (withRequestSize) => [
     "-nostdin",
     "-hide_banner",
     "-nostats",
@@ -5420,7 +5674,14 @@ async function serveWithFfmpeg(sourceUrl, userAgent, bitRate = 128, extraHeaders
     "-reconnect_delay_max", "5",
     "-rw_timeout", "15000000",
     // YouTube 的流要分段请求，块开大一点
-    "-request_size", String(10 << 20),
+    /* ⚠️⚠️ -request_size 不是所有 ffmpeg 构建都有！
+       它是 libavformat 的 HTTP 私有选项，实测：
+         · 163MB 完整版（gyan.dev full）→ 支持
+         · 78MB essentials 精简版 → **Option not found**，ffmpeg 直接退出，
+           整个转码失败，用户看到的就是「这首歌暂时找不到能播的音源」。
+       所以这里不硬塞：由 buildArgs(withReqSize) 控制，
+       第一次带 -request_size 跑，若因它失败就自动去掉重试。 */
+    ...(withRequestSize ? ["-request_size", String(10 << 20)] : []),
     ...(userAgent ? ["-user_agent", userAgent] : []),
     /* 额外的请求头（B 站必须带 Referer，否则 CDN 403）。
        ffmpeg 的 -headers 要求每行以 \r\n 结尾，多个头拼成一整串。 */
@@ -5439,20 +5700,26 @@ async function serveWithFfmpeg(sourceUrl, userAgent, bitRate = 128, extraHeaders
     url,
   ];
 
+  /* 启动前先问一句「这个 ffmpeg 认不认 -request_size」，结果会缓存。
+     认 → 带上（YouTube 分段更好）；不认 → 直接不带，不会白撞一次。 */
+  const useReqSize = await ffmpegSupports(exe, "request_size");
+
   let proc;
   try {
-    proc = spawn(exe, args);
-    trace("ffmpeg 已启动", "pid=" + (proc && proc.pid));
+    proc = spawn(exe, buildArgs(useReqSize));
+    trace("ffmpeg 已启动", "pid=" + (proc && proc.pid) + " reqSize=" + useReqSize);
   } catch (e) {
     const msg = String((e && e.message) || e);
     trace("✗ ffmpeg spawn 抛错", msg.slice(0, 120));
     console.log("[粽子] ffmpeg 启动失败: " + msg);
-    /* 文件不存在 → 触发下载，下载完再试一次 */
+    /* 文件不存在 → 触发下载，下载完再试一次。
+       换成本地新下载的 ffmpeg 后，能力缓存要重探（路径变了会自动重探）。 */
     try {
       const dl = await ensureFfmpeg();
       if (dl && dl !== exe) {
         exe = dl;
-        proc = spawn(exe, args);
+        const useReqSize2 = await ffmpegSupports(exe, "request_size");
+        proc = spawn(exe, buildArgs(useReqSize2));
         trace("ffmpeg 下载后启动", "pid=" + (proc && proc.pid));
       }
     } catch (e2) {
@@ -5466,21 +5733,31 @@ async function serveWithFfmpeg(sourceUrl, userAgent, bitRate = 128, extraHeaders
 
   SERVING.push(proc);
   let stopped = false;
-  // 90 秒还没开始服务就放弃（慢网下 ffmpeg 拉流确实要等）
-  const timer = setTimeout(() => {
-    try {
-      if (proc.kill) proc.kill();
-    } catch {}
-  }, 90000);
+  let timer = null;
 
-  try {
-    proc.wait().then(() => {
-      stopped = true;
-      clearTimeout(timer);
-      const at = SERVING.indexOf(proc);
-      if (at >= 0) SERVING.splice(at, 1);
-    });
-  } catch {}
+  /* 绑定「进程退出」回调。重试换 proc 时要重新绑一次（见下面兜底逻辑）。 */
+  const watchProc = (p) => {
+    try {
+      p.wait().then(() => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        const at = SERVING.indexOf(p);
+        if (at >= 0) SERVING.splice(at, 1);
+      });
+    } catch {}
+  };
+  const armTimer = (p) => {
+    if (timer) clearTimeout(timer);
+    // 90 秒还没开始服务就放弃（慢网下 ffmpeg 拉流确实要等）
+    timer = setTimeout(() => {
+      try {
+        if (p && p.kill) p.kill();
+      } catch {}
+    }, 90000);
+  };
+
+  watchProc(proc);
+  armTimer(proc);
 
   /* 就绪判断：等 stderr 里出现 "Input #0"。
      ⚠️⚠️ 千万不能用 fetch 去探端口！ffmpeg 的 -listen 1 只接受**一次**连接，
@@ -5508,8 +5785,10 @@ async function serveWithFfmpeg(sourceUrl, userAgent, bitRate = 128, extraHeaders
       break;
     }
     if (stopped) {
-      const tail = errText().trim().split("\n").filter(Boolean).pop() || "";
+      const full = errText();
+      const tail = full.trim().split("\n").filter(Boolean).pop() || "";
       console.log("[粽子] ffmpeg 提前退出: " + tail.slice(0, 160));
+
       return null;
     }
     await sleep(50);
@@ -7500,6 +7779,75 @@ export async function home() {
     console.log("[粽子] 拼好歌失败: " + ((e && e.message) || e));
   }
 
+  /* ①.⑤ ffmpeg 提示 —— 只在**没装好**时出现，装好就自动消失
+     ------------------------------------------------------------
+     为什么放首页而不是侧栏：
+       · navigation 是 plugin.json 里的静态 JSON，运行时改不了，
+         没法做到「装好就消失」
+       · 首页每次进入都重新跑 home()，天然支持条件隐藏
+         （用户已确认接受「重进首页才更新」）
+
+     ⚠️ 绝不能 await ensureFfmpeg() —— 用户只是打开首页，
+        不该被动拉 78MB。ffmpegStatus() 只做静默检测。
+     ⚠️ MyGo 页面没有颜色/样式字段，只能用 ⚠️ emoji 模拟醒目提示。 */
+  try {
+    const st = await ffmpegStatus();
+    if (!st.installed) {
+      const downloading = DOWNLOAD_STATE === "downloading" || !!DOWNLOAD_PROMISE;
+      const failed = DOWNLOAD_STATE === "failed";
+
+      /* 带图卡片：用看板娘的图当 imageUrl。
+         ⚠️ 卡片样式（图片大小、圆角、间距）是 MyGo 画的，插件改不了；
+            我们能做的只是「给图 / 不给图」。
+            不给图 → 灰音符占位（更丑）；给图 → 至少是本项目的看板娘。
+         所以这里是「两害相权取其轻」，不是理想形态。
+
+         ⚠️⚠️ 说明文字一律写进 **title**，不放 subtitle。
+            实测截图：subtitle 在窄卡片里会被截断成「YouTube / 播客播放需要...」，
+            用户根本看不全。title 是主行，字号大、空间足，能完整显示。
+            subtitle 只放真正次要的补充（比如字数、状态）。 */
+      if (downloading) {
+        sections.push({
+          title: "⏳ ffmpeg 下载中",
+          links: [
+            {
+              title: "正在后台下载，点这里查看进度",
+              subtitle: "下载期间 YouTube / 播客暂时放不了",
+              imageUrl: FFMPEG_DOWNLOADING_IMAGE,
+              page: "ffmpeg",
+            },
+          ],
+        });
+      } else if (failed) {
+        sections.push({
+          title: "⚠️ ffmpeg 未安装",
+          links: [
+            {
+              title: "上次下载失败，点这里重试",
+              subtitle: "播放 YouTube / 播客需要 ffmpeg",
+              imageUrl: FFMPEG_PROMPT_IMAGE,
+              page: "ffmpeg",
+            },
+          ],
+        });
+      } else {
+        sections.push({
+          title: "⚠️ ffmpeg 未安装",
+          links: [
+            {
+              title: "点我下载（约 78 MB）",
+              subtitle: "播放 YouTube / 播客需要它",
+              imageUrl: FFMPEG_PROMPT_IMAGE,
+              page: "ffmpeg",
+            },
+          ],
+        });
+      }
+    }
+  } catch (e) {
+    console.log("[粽子] ffmpeg 状态检测失败: " + ((e && e.message) || e));
+  }
+
   /* ② 各分类。
      ⚠️ 不用 playlists 了—— 歌单只有网易云有接口，
         整个主页就全是网易云的歌单，聚合的意义没了。
@@ -7522,7 +7870,19 @@ export async function home() {
   const SLOT_LABEL = ["", " · 第二单", " · 第三单", " · 第四单", " · 第五单", " · 第六单", " · 第七单"];
   HOME_CATS.forEach((c, i) => {
     const pls = [];
-    const cover = (arr) => (arr[0] && arr[0].album && arr[0].album.imageUrl) || (arr[0] && arr[0].artwork) || "";
+    /* ⚠️⚠️ 封面必须回落到 FALLBACK_COVER！
+       实测（2026-11-11 截图）：以前这里是 `|| ""`，
+       某些混排（比如第一首是酷我/QQ 的冷门曲）拿不到专辑封面，
+       imageUrl 就是空串 → MyGo 画一个**纯灰方块**，首页一排排灰块很难看。
+       规则：有专辑封面用专辑封面，没有就用项目兜底图（看板娘黑胶那张）。 */
+    const cover = (arr) => {
+      for (const t of arr || []) {
+        if (!t) continue;
+        const art = (t.album && t.album.imageUrl) || t.artwork || "";
+        if (art) return art;
+      }
+      return FALLBACK_COVER;
+    };
     for (let s = 0; s < SLOTS_PER_CAT; s++) {
       const m = catMixes[i * SLOTS_PER_CAT + s] || [];
       if (m.length < 6) continue;
@@ -7550,6 +7910,99 @@ export async function home() {
 export async function browse({ page }) {
   const p = String(page || "");
 
+  /* ============================================================
+   * page: "home" —— 让插件页面能「跳回首页」
+   * ------------------------------------------------------------
+   * MyGo 的 links 只能跳到插件自己的 browse 页面（或内置的几个），
+   * 没法直接调用 builtin: home。所以这里把 home() 的内容原样返回，
+   * 用户点「回首页」看到的就和真首页一样，而且会重新执行 home()，
+   * ffmpeg 装好了那条提示自然就没了。
+   * ============================================================ */
+  if (p === "home") {
+    return home();
+  }
+
+  /* ============================================================
+   * ffmpeg 页面 —— 从首页那条提示点进来
+   * ------------------------------------------------------------
+   * 三种状态：已安装 / 正在下载 / 未安装
+   * 「开始下载」做成 links 项，点进来本身就是动作 ——
+   * 因为 MyGo 页面没有按钮控件，只能靠「点开这个链接=执行」。
+   * ============================================================ */
+  if (p === "ffmpeg") {
+    const st = await ffmpegStatus();
+    const downloading = DOWNLOAD_STATE === "downloading" || !!DOWNLOAD_PROMISE;
+
+    /* 已装好 → 直接展示首页内容，不再停留在这个「下载页」。
+       用户要的是「装好了就回首页」，而不是再看一屏成功提示。
+       返回 home() 的内容，页面标题会变成「粽子音源」，
+       首页那条 ffmpeg 提示此时也会自动消失（因为已经装好了）。 */
+    if (st.installed) {
+      return home();
+    }
+
+    // 正在下载
+    if (downloading) {
+      /* 说明合并进主卡片，不留单独的「说明」区段（灰块很难看）。 */
+      return {
+        title: "ffmpeg 下载中",
+        sections: [
+          {
+            title: "⏳ 正在下载",
+            links: [
+              {
+                /* 点这张卡片 = 重新加载本页（MyGo 没有自动刷新，
+                   只能靠用户点一下重新请求）。
+                   page 指向自己 "ffmpeg"：重新进来会重新 ffmpegStatus()，
+                   下载已完成则直接 return home()，用户就「跳」回首页了。 */
+                title: "正在后台下载（约 78 MB）",
+                subtitle: "点这张卡片刷新",
+                imageUrl: FFMPEG_DOWNLOADING_IMAGE,
+                page: "ffmpeg", // 指向自己 → 重新加载本页重新检测
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    /* 未安装 / 失败 —— 这里就是「下载按钮」。
+       ⚠️ 进来这个页面时**不自动下载**：用户可能是误点。
+          要再点一次下面那条「开始下载」才真正触发。
+          但那样要往返两次，体验太差。
+          折中：进来就启动下载（用户是从首页「点这里下载」点进来的，意图明确），
+          然后立刻显示「正在下载」。
+          为了排除误点，只在**从首页点进来**时启动 —— 而 page=ffmpeg
+          本来就只有首页那一条链接会进来，所以直接启动是安全的。 */
+    startFfmpegDownloadInBackground();
+
+    /* ⚠️ 不要再单独做「说明」区段！
+       实测截图：links 没有 imageUrl 时，MyGo 会画一个**灰色音符占位框**，
+       两个说明条目就变成两个大灰块，比不放还丑。
+       所以说明全部合并进主卡片：
+         · 主标题 → 动作（正在下载）
+         · 副标题 → 原因 + 体量 + 自备方式，压缩成一句
+       一句话塞不下的细节（比如具体目录）才单独留一行文字链接。 */
+    return {
+      title: "开始下载 ffmpeg",
+      sections: [
+        {
+          title: "⏳ 已开始下载",
+          links: [
+            {
+              /* ⚠️⚠️ 一个区段里只放**一条** links！无图条目会渲染成灰色大块。
+                 ⚠️ 副标题在窄卡片里会被截断，所以体量、时长这类关键信息
+                    一律写进 title；subtitle 只留短句。 */
+              title: "正在后台下载（约 78 MB）",
+              subtitle: "YouTube / 播客要它转 mp3 · 已有 ffmpeg.exe 可跳过",
+              imageUrl: FFMPEG_DOWNLOADING_IMAGE,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
   // 分类的「查看全部」—— 跟主页同一套跨平台拼单
   if (p.startsWith("cat:")) {
     const key = p.slice(4);
@@ -7568,10 +8021,14 @@ export async function browse({ page }) {
   // 我的歌单（自建 + 收藏）
   if (p === "mylists") {
     const pls = await playlists();
-    return {
-      title: "我的歌单",
-      sections: [{ playlists: pls, empty: "还没有歌单，去收藏或新建一个吧" }],
-    };
+    const sections = [{ playlists: pls, empty: "还没有歌单，去收藏或新建一个吧" }];
+
+    /* ⚠️ 播客区已从这里移除（2026-11-11 用户要求）。
+       原因：「我的播客」在侧栏有独立入口（page: myshows），
+       塞进「我的歌单」页会让两个页面内容重叠、也容易让人以为
+       播客属于歌单。想看播客直接点侧栏那个入口。 */
+
+    return { title: "我的歌单", sections };
   }
 
   // 最近播放

@@ -1,5 +1,7 @@
 # 粽子音源 · MyGo 插件
 
+![粽子音源](assets/kanban/zongzi-ad-banner.jpg)
+
 聚合多个音乐源的 [MyGo](https://github.com/egoist/mygo-music) 音源插件。跨平台源聚合、相互兜底，主流 App 找不到的曲目也能在这里补齐。
 
 ## 功能

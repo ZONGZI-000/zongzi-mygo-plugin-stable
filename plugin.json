@@ -1,7 +1,7 @@
 {
   "id": "zongzi-music",
   "name": "粽子音源",
-  "version": "1.1.0-beta.20",
+  "version": "1.1.0",
   "minAppVersion": "0.1.23",
   "main": "index.js",
   "playback": "stream",
@@ -141,5 +141,5 @@
       "icon": "heart"
     }
   ],
-  "description": " · QQ音乐"
+  "description": "免费、免登录的多源聚合音源。搜索、歌单、歌手、专辑、电台一站齐活，支持播客订阅收听，冷门曲目也能补齐。"
 }

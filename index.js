@@ -4879,22 +4879,70 @@ export async function artist({ id }) {
   const m = /^nar:(\d+)$/.exec(String(id));
   if (!m) throw fail("unavailable", "无法识别的歌手");
   const artistId = m[1];
+  /* ⚠️⚠️ 名字/封面不能只信内存 artistCache —— 它是进程内的 Map，
+     MyGo 一重启就空了。实测踩过：从「艺人收藏」点进去，页面标题变成
+     「歌手」、头像是空白圆、专辑区一片空。
+     兜底顺序：
+       ① artistCache（本进程刚搜过 / 刚关注过）
+       ② 收藏列表快照（followedArtists 里就存着 name + imageUrl）
+       ③ 网易 artist 详情接口（补封面，也补名字）
+     name 还必须拿到，否则 songsOfArtist 拿空串去搜，一首歌都搜不到。 */
   const cached = artistCache.get(artistId);
-  const name = (cached && cached.name) || "";
+  let name = (cached && cached.name) || "";
+  let cover = (cached && cached.artwork) || "";
+  if (!name || !cover) {
+    const fav = readList(FOLLOWED_ARTIST_KEY).find(
+      (x) => String(x.id) === "nar:" + artistId
+    );
+    if (fav) {
+      if (!name && fav.name) name = String(fav.name);
+      if (!cover && fav.imageUrl) cover = String(fav.imageUrl);
+    }
+  }
+  if (!name || !cover) {
+    try {
+      const url =
+        "https://music.163.com/api/artist/" + encodeURIComponent(artistId);
+      const { text } = await fetchText(url, {
+        headers: { Referer: "https://music.163.com/" },
+      });
+      const d = JSON.parse(text);
+      const a = (d && d.artist) || {};
+      if (!name && a.name) name = String(a.name);
+      if (!cover) cover = String(a.picUrl || a.img1v1Url || "");
+    } catch {}
+  }
+  if (name) artistCache.set(artistId, { name, artwork: cover });
   let tracks = [];
-  try {
-    tracks = await songsOfArtist(artistId, name);
-  } catch {}
+  if (name) {
+    try {
+      tracks = await songsOfArtist(artistId, name);
+    } catch {}
+  }
   remember(tracks);
   return {
     artist: {
       id,
       name: name || "歌手",
-      imageUrl: (cached && cached.artwork) || "",
-      artwork: (cached && cached.artwork) || "",
+      imageUrl: cover,
+      artwork: cover,
     },
     tracks,
-    albums: [],
+    /* ⚠️ 网易艺人接口拿不到干净的专辑结构（app 接口要签名，web 接口返回的
+       hotSongs/albums 结构经常缺），所以跟 yda: 下架歌手一样，把「全部歌曲」
+       做成一个虚拟专辑 —— 至少别让专辑区空着显得像坏了。 */
+    albums: tracks.length
+      ? [
+          {
+            id: "ydalb:" + (name || "歌手"),
+            name: (name || "歌手") + " · 全部歌曲",
+            imageUrl: cover,
+            artwork: cover,
+            artists: [{ id, name: name || "歌手" }],
+            trackCount: tracks.length,
+          },
+        ]
+      : [],
   };
 }
 
